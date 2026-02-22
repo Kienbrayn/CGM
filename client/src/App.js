@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 // ===============================================
 
 const CONFIG = {
-  API_URL: "https://cgm-j82x.onrender.com",
+  API_URL: "https://cgm-hbdj-ms2jknubx-kienbrayn2-7108s-projects.vercel.app/",
   TICK_RATE_MS: 5000, // Sync with server every 5s
   ENERGY_COST: 10,
   PACK_COST: 50,
