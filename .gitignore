@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Environment variables (IMPORTANT: Do not upload secrets!)
+server/.env
+
+# Build files
+client/build/
