@@ -3,352 +3,271 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 
+const app = express();
+const PORT = process.env.PORT || 3001;
+
 // --- CONFIGURATION ---
-const CONFIG = {
-  PORT: process.env.PORT || 3001,
-  SALT_ROUNDS: 10,
-  STARTING_CREDITS: 100,
-  PACK_COST: 50,
-  ENERGY_COST_MINE: 10,
-  ENERGY_REGEN_RATE: 1, // Per minute
-  MAX_ENERGY: 100, // Fallback if DB default isn't set
-  RARITY_CHANCES: {
-    COMMON: 70,
-    RARE: 25, // 71-95
-    MYTHIC: 5 // 96-100
-  }
-};
+const SALT_ROUNDS = 10;
+
+// --- SECURITY MIDDLEWARE ---
+
+// 1. Helmet sets various HTTP headers for security
+app.use(helmet());
+
+// 2. CORS: This allows your Vercel frontend to talk to this backend
+app.use(cors({
+  origin: [
+    'https://cgm-hbdj-ms2jknubx-kienbrayn2-7108s-projects.vercel.app', // Your specific Vercel URL
+    'http://localhost:3001', // Allow local development
+    'http://localhost:3000'
+  ],
+  credentials: true
+}));
+
+app.use(express.json());
 
 // --- DATABASE SETUP ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // Only use SSL if in production (Render)
   ssl: process.env.NODE_ENV === 'production' 
     ? { rejectUnauthorized: false } 
     : false
 });
 
-// Simple query helper for cleaner code
+// Helper for queries
 const query = (text, params) => pool.query(text, params);
-
-// --- EXPRESS SETUP ---
-const app = express();
-
-// Security Middleware
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
-
-// Rate Limiting (Prevent spam)
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: { error: 'Too many requests, please try again later.' }
-});
-app.use('/api/', apiLimiter);
-
-// --- UTILITIES ---
-
-// Async Handler wrapper to catch errors in async routes
-const asyncHandler = fn => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
-};
-
-// Custom Error Class
-class AppError extends Error {
-  constructor(message, statusCode) {
-    super(message);
-    this.statusCode = statusCode;
-    this.isOperational = true;
-    Error.captureStackTrace(this, this.constructor);
-  }
-}
 
 // --- AUTH ROUTES ---
 
-app.post('/api/register', asyncHandler(async (req, res) => {
+// REGISTER (Now with Password Hashing!)
+app.post('/api/register', async (req, res) => {
   const { username, password } = req.body;
-
+  
   if (!username || !password) {
-    throw new AppError('Username and password are required', 400);
+    return res.status(400).json({ error: "Username and password required" });
   }
 
-  const password_hash = await bcrypt.hash(password, CONFIG.SALT_ROUNDS);
   const client = await pool.connect();
-
+  
   try {
     await client.query('BEGIN');
+    
+    // Hash the password before saving
+    const password_hash = await bcrypt.hash(password, SALT_ROUNDS);
 
-    // 1. Create User
+    // 1. Create User (Store the hash, not plain text!)
     const userRes = await client.query(
-      'INSERT INTO users (username, password_hash, credits) VALUES ($1, $2, $3) RETURNING id, username, credits, energy',
-      [username, password_hash, CONFIG.STARTING_CREDITS]
+      'INSERT INTO users (username, password_hash, credits) VALUES ($1, $2, 100) RETURNING id, username, credits, energy',
+      [username, password_hash]
     );
     const newUser = userRes.rows[0];
 
-    // 2. Give Starter Card
-    // NOTE: In production, avoid hardcoding ID '1'. Use: SELECT id FROM card_types WHERE name = 'Rusty Pickaxe'
-    const starterCardId = 1; 
-    
+    // 2. Give Starter Card (Rusty Pickaxe ID = 1)
+    // Note: Make sure you have a card with ID 1 in your 'card_types' table
     await client.query(
       `INSERT INTO user_cards (user_id, card_type_id, current_durability, equipped) 
-       VALUES ($1, $2, 50, true)`,
-      [newUser.id, starterCardId]
+       VALUES ($1, 1, 50, true)`, 
+      [newUser.id]
     );
 
     await client.query('COMMIT');
-    
-    // Return safe user data (no password hash)
-    res.status(201).json({ 
-      message: "Registration successful", 
-      user: newUser 
-    });
-  } catch (error) {
+    res.status(201).json(newUser);
+  } catch (e) {
     await client.query('ROLLBACK');
-    if (error.code === '23505') { // Unique violation in Postgres
-      throw new AppError('Username already exists', 409);
+    console.error(e);
+    if (e.code === '23505') {
+       return res.status(409).json({ error: "User already exists" });
     }
-    throw error; // Pass to global error handler
+    res.status(500).json({ error: "Registration failed" });
   } finally {
     client.release();
   }
-}));
+});
 
-app.post('/api/login', asyncHandler(async (req, res) => {
+// LOGIN (Now checks Hashed Password)
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-
-  const result = await query(
-    'SELECT * FROM users WHERE username = $1',
-    [username]
-  );
-
-  const user = result.rows[0];
-
-  if (!user) {
-    throw new AppError('Invalid credentials', 401);
-  }
-
-  const isMatch = await bcrypt.compare(password, user.password_hash);
-
-  if (!isMatch) {
-    throw new AppError('Invalid credentials', 401);
-  }
-
-  // Return safe user data
-  const { password_hash, ...safeUserData } = user;
-  res.json({ user: safeUserData });
-}));
-
-// --- GAME LOGIC ROUTES ---
-
-// 1. Get State
-app.get('/api/state/:userId', asyncHandler(async (req, res) => {
-  const { userId } = req.params;
-
-  const userRes = await query('SELECT * FROM users WHERE id = $1', [userId]);
-  const user = userRes.rows[0];
-
-  if (!user) {
-    throw new AppError('User not found', 404);
-  }
-
-  // Energy Regen Logic
-  const now = new Date();
-  const lastActive = new Date(user.last_mined_at || now);
-  const minutesPassed = Math.floor((now - lastActive) / 60000);
-
-  if (minutesPassed > 0) {
-    const maxEnergy = user.max_energy || CONFIG.MAX_ENERGY;
-    const energyGain = Math.min(minutesPassed * CONFIG.ENERGY_REGEN_RATE, maxEnergy);
-    const newEnergy = Math.min(user.energy + energyGain, maxEnergy);
-
-    // Only update DB if energy actually changed
-    if (newEnergy !== user.energy) {
-      await query(
-        'UPDATE users SET energy = $1, last_mined_at = NOW() WHERE id = $2', 
-        [newEnergy, userId]
-      );
-      user.energy = newEnergy;
-    }
-  }
-
-  const cardsRes = await query(
-    `SELECT uc.id, ct.name, ct.rarity, ct.mine_power, uc.current_durability, uc.equipped 
-     FROM user_cards uc 
-     JOIN card_types ct ON uc.card_type_id = ct.id 
-     WHERE uc.user_id = $1`,
-    [userId]
-  );
-
-  res.json({ user, inventory: cardsRes.rows });
-}));
-
-// 2. Toggle Equip Card
-app.post('/api/equip', asyncHandler(async (req, res) => {
-  const { userId, cardId } = req.body;
   
-  // Ideally, check if the card belongs to the user before toggling
-  const result = await query(
-    'UPDATE user_cards SET equipped = NOT equipped WHERE id = $1 AND user_id = $2 RETURNING equipped',
-    [cardId, userId]
-  );
-
-  if (result.rowCount === 0) {
-    throw new AppError('Card not found or does not belong to user', 404);
-  }
-
-  res.json({ success: true, equipped: result.rows[0].equipped });
-}));
-
-// 3. Buy Pack
-app.post('/api/buy-pack', asyncHandler(async (req, res) => {
-  const { userId } = req.body;
-  const client = await pool.connect();
-
   try {
-    await client.query('BEGIN');
-
-    // Lock row for update
-    const userRes = await client.query('SELECT credits FROM users WHERE id = $1 FOR UPDATE', [userId]);
-    if (userRes.rows.length === 0) throw new AppError('User not found', 404);
+    const result = await query(
+      'SELECT * FROM users WHERE username = $1',
+      [username]
+    );
     
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Compare typed password with the hashed password in DB
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+
+    if (!isMatch) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Return user data (excluding password)
+    const { password_hash, ...safeUserData } = user;
+    res.json(safeUserData);
+    
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
+
+// --- GAME LOGIC ---
+
+// Get State
+app.get('/api/state/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const userRes = await query('SELECT * FROM users WHERE id = $1', [userId]);
     const user = userRes.rows[0];
 
-    if (user.credits < CONFIG.PACK_COST) {
-      throw new AppError('Not enough credits!', 400);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Energy Regen Logic
+    const now = new Date();
+    const lastActive = new Date(user.last_mined_at || now);
+    const minutesPassed = Math.floor((now - lastActive) / 60000);
+
+    if (minutesPassed > 0) {
+        const maxEnergy = user.max_energy || 100;
+        const energyGain = minutesPassed * 1; 
+        const newEnergy = Math.min(user.energy + energyGain, maxEnergy);
+        
+        if (newEnergy !== user.energy) {
+            await query('UPDATE users SET energy = $1, last_mined_at = NOW() WHERE id = $2', [newEnergy, userId]);
+            user.energy = newEnergy;
+        }
     }
 
-    // Deduct Credits
-    await client.query('UPDATE users SET credits = credits - $1 WHERE id = $2', [CONFIG.PACK_COST, userId]);
-
-    // Determine Rarity
-    const roll = Math.floor(Math.random() * 100) + 1;
-    let rarityId;
-
-    if (roll <= CONFIG.RARITY_CHANCES.COMMON) rarityId = 1;        // Rusty Pickaxe
-    else if (roll <= CONFIG.RARITY_CHANCES.COMMON + CONFIG.RARITY_CHANCES.RARE) rarityId = 2; // Iron Hammer
-    else rarityId = 3;                                              // Quantum Drill
-
-    // Get Card Definition
-    // Note: Ideally select name as well to return it to frontend
-    const cardDefRes = await client.query('SELECT durability, name FROM card_types WHERE id = $1', [rarityId]);
-    if (cardDefRes.rows.length === 0) throw new AppError('Invalid card configuration', 500);
-
-    const cardDef = cardDefRes.rows[0];
-
-    // Grant Card
-    await client.query(
-      'INSERT INTO user_cards (user_id, card_type_id, current_durability, equipped) VALUES ($1, $2, $3, false)',
-      [userId, rarityId, cardDef.durability]
+    const cardsRes = await query(
+      `SELECT uc.id, ct.name, ct.rarity, ct.mine_power, uc.current_durability, uc.equipped 
+       FROM user_cards uc 
+       JOIN card_types ct ON uc.card_type_id = ct.id 
+       WHERE uc.user_id = $1`,
+      [userId]
     );
-
-    await client.query('COMMIT');
-    res.json({ success: true, message: `You found a ${cardDef.name}!` });
-
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+    
+    res.json({ user, inventory: cardsRes.rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
-}));
+});
 
-// 4. Mine
-app.post('/api/mine', asyncHandler(async (req, res) => {
+// Equip Card
+app.post('/api/equip', async (req, res) => {
+  const { userId, cardId } = req.body;
+  try {
+    await query(
+      'UPDATE user_cards SET equipped = NOT equipped WHERE id = $1 AND user_id = $2',
+      [cardId, userId]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: "Equip failed" });
+  }
+});
+
+// Buy Pack
+app.post('/api/buy-pack', async (req, res) => {
   const { userId } = req.body;
+  const PACK_COST = 50;
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
+    
+    const userRes = await client.query('SELECT credits FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const user = userRes.rows[0];
 
-    // Lock user row
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.credits < PACK_COST) return res.status(400).json({ error: "Not enough credits!" });
+
+    await client.query('UPDATE users SET credits = credits - $1 WHERE id = $2', [PACK_COST, userId]);
+
+    // Random Card Logic
+    const roll = Math.floor(Math.random() * 100) + 1;
+    let rarityId;
+    
+    if (roll <= 70) rarityId = 1;       // Common
+    else if (roll <= 95) rarityId = 2;  // Rare
+    else rarityId = 3;                  // Mythic
+
+    const cardDefRes = await client.query('SELECT durability FROM card_types WHERE id = $1', [rarityId]);
+    if (cardDefRes.rows.length === 0) throw new Error("Card definition missing in DB");
+    
+    const durability = cardDefRes.rows[0].durability;
+
+    await client.query(
+      'INSERT INTO user_cards (user_id, card_type_id, current_durability, equipped) VALUES ($1, $2, $3, false)',
+      [userId, rarityId, durability]
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: "Pack opened!" });
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: "Purchase failed" });
+  } finally {
+    client.release();
+  }
+});
+
+// Mine
+app.post('/api/mine', async (req, res) => {
+  const { userId } = req.body;
+  const ENERGY_COST = 10;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    
     const userRes = await client.query('SELECT * FROM users WHERE id = $1 FOR UPDATE', [userId]);
     const user = userRes.rows[0];
 
-    if (!user) throw new AppError('User not found', 404);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.energy < ENERGY_COST) return res.status(400).json({ error: "Need 10 Energy!" });
 
-    if (user.energy < CONFIG.ENERGY_COST_MINE) {
-      throw new AppError(`Need ${CONFIG.ENERGY_COST_MINE} Energy! (Regens over time)`, 400);
-    }
-
-    // Get Active Equipment
     const activeCardsRes = await client.query(
-      `SELECT uc.id, ct.mine_power, uc.current_durability 
-       FROM user_cards uc 
-       JOIN card_types ct ON uc.card_type_id = ct.id 
-       WHERE uc.user_id = $1 AND uc.equipped = true`,
+      'SELECT uc.id, ct.mine_power, uc.current_durability FROM user_cards uc JOIN card_types ct ON uc.card_type_id = ct.id WHERE uc.user_id = $1 AND uc.equipped = true',
       [userId]
     );
 
-    if (activeCardsRes.rows.length === 0) {
-      throw new AppError('Equip a card first!', 400);
-    }
+    if (activeCardsRes.rows.length === 0) return res.status(400).json({ error: "Equip a card first!" });
 
     let totalMined = 0;
-    const updatePromises = [];
-
-    // Process Mining
     for (let card of activeCardsRes.rows) {
       if (card.current_durability > 0) {
         totalMined += card.mine_power;
-        // Collect promises to run in parallel later (or sequentially if preferred)
-        updatePromises.push(
-          client.query('UPDATE user_cards SET current_durability = current_durability - 1 WHERE id = $1', [card.id])
-        );
+        await client.query('UPDATE user_cards SET current_durability = current_durability - 1 WHERE id = $1', [card.id]);
       }
     }
 
-    // Update durability for all used cards
-    await Promise.all(updatePromises);
-
-    const newEnergy = user.energy - CONFIG.ENERGY_COST_MINE;
+    const newEnergy = user.energy - ENERGY_COST;
     const newCredits = user.credits + totalMined;
     
-    await client.query(
-      'UPDATE users SET energy = $1, credits = $2, last_mined_at = NOW() WHERE id = $3', 
-      [newEnergy, newCredits, userId]
-    );
+    await client.query('UPDATE users SET energy = $1, credits = $2, last_mined_at = NOW() WHERE id = $3', 
+      [newEnergy, newCredits, userId]);
 
     await client.query('COMMIT');
-    res.json({ 
-      message: `Mined ${totalMined} credits!`, 
-      credits: newCredits, 
-      energy: newEnergy,
-      minedAmount: totalMined
-    });
+    res.json({ message: `Mined ${totalMined} credits!`, credits: newCredits, energy: newEnergy, minedAmount: totalMined });
 
-  } catch (error) {
+  } catch (e) {
     await client.query('ROLLBACK');
-    throw error;
+    res.status(500).json({ error: "Mining failed" });
   } finally {
     client.release();
   }
-}));
-
-// --- GLOBAL ERROR HANDLER ---
-// This must be defined last
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-
-  // Handle known operational errors
-  if (err instanceof AppError) {
-    return res.status(err.statusCode).json({ error: err.message });
-  }
-
-  // Handle specific Postgres errors
-  if (err.code === '23505') {
-    return res.status(409).json({ error: 'Duplicate entry detected.' });
-  }
-
-  // Generic error
-  res.status(500).json({ error: 'Something went wrong on the server.' });
 });
 
-// --- START SERVER ---
-app.listen(CONFIG.PORT, () => {
-  console.log(`Server running on port ${CONFIG.PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

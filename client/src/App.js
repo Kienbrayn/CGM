@@ -1,15 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 
 // ===============================================
-// 1. CONFIGURATION & THEME
+// 1. STYLES & THEME (MOVED TO TOP)
 // ===============================================
-
-const CONFIG = {
-  API_URL: "https://cgm-hbdj-ms2jknubx-kienbrayn2-7108s-projects.vercel.app/",
-  TICK_RATE_MS: 5000, // Sync with server every 5s
-  ENERGY_COST: 10,
-  PACK_COST: 50,
-};
 
 const THEME = {
   colors: {
@@ -34,11 +27,32 @@ const THEME = {
   }
 };
 
+// Base Container Style defined here so it's available everywhere
+const styles = {
+  container: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    minHeight: '100vh',
+    background: THEME.colors.bg,
+    color: THEME.colors.text,
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    padding: '20px',
+    boxSizing: 'border-box'
+  }
+};
+
+const CONFIG = {
+  API_URL: "https://cgm-j82x.onrender.com",
+  TICK_RATE_MS: 5000, 
+  ENERGY_COST: 10,
+  PACK_COST: 50,
+};
+
 // ===============================================
 // 2. UTILITIES & AUDIO
 // ===============================================
 
-// Simple Synthesizer for Sound Effects (No external files needed)
 const useAudio = () => {
   const playSound = (type) => {
     try {
@@ -72,7 +86,6 @@ const useAudio = () => {
         osc.stop(ctx.currentTime + 0.2);
       }
     } catch (e) {
-      // Audio context might fail in some browsers
       console.log("Audio failed", e);
     }
   };
@@ -81,16 +94,15 @@ const useAudio = () => {
 };
 
 // ===============================================
-// 3. CUSTOM HOOK: GAME LOGIC (Controller)
+// 3. CUSTOM HOOK: GAME LOGIC
 // ===============================================
 
 const useGameLogic = (showToast, playSound) => {
   const [user, setUser] = useState(null);
   const [inventory, setInventory] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [view, setView] = useState('login'); // 'login' | 'game'
+  const [view, setView] = useState('login'); 
 
-  // Helper for API calls
   const apiCall = async (endpoint, method = 'GET', body = null) => {
     try {
       const options = {
@@ -111,25 +123,23 @@ const useGameLogic = (showToast, playSound) => {
     }
   };
 
-  // Fetch User State
   const fetchState = useCallback(async (userId) => {
     try {
       const data = await apiCall(`state/${userId}`);
       if (data.user) {
         setUser(data.user);
-        setInventory(data.inventory);
+        setInventory(data.inventory || []);
       }
     } catch (e) {
-      // Silent fail in background polling, or handle gracefully
+      // Silent fail for background polling
     }
   }, [showToast, playSound]);
 
-  // Auth Functions
   const handleAuth = async (action, username, password) => {
     setIsLoading(true);
     try {
       const data = await apiCall(action, 'POST', { username, password });
-      setUser(data.user || data); // Register returns user directly
+      setUser(data.user || data); 
       setInventory(data.inventory || []);
       setView('game');
       playSound('success');
@@ -146,9 +156,9 @@ const useGameLogic = (showToast, playSound) => {
     setView('login');
   };
 
-  // Game Actions
   const mine = async () => {
-    if (user.energy < CONFIG.ENERGY_COST) {
+    // Safety check: ensure user is loaded
+    if (!user || user.energy < CONFIG.ENERGY_COST) {
       showToast("Not enough energy!", "warning");
       playSound('error');
       return;
@@ -158,8 +168,7 @@ const useGameLogic = (showToast, playSound) => {
     try {
       const data = await apiCall('mine', 'POST', { userId: user.id });
       setUser(prev => ({ ...prev, energy: data.energy, credits: data.credits }));
-      // Optimistically update inventory durability locally if server returns details
-      showToast(`Mined +${data.minedAmount} Credits!`, "success");
+      showToast(`Mined +${data.minedAmount || 0} Credits!`, "success");
     } catch (e) {}
   };
 
@@ -169,7 +178,7 @@ const useGameLogic = (showToast, playSound) => {
       const data = await apiCall('buy-pack', 'POST', { userId: user.id });
       showToast(data.message || "Pack opened!", "success");
       playSound('success');
-      await fetchState(user.id); // Refresh inventory
+      await fetchState(user.id); 
     } catch (e) {}
     finally { setIsLoading(false); }
   };
@@ -181,7 +190,6 @@ const useGameLogic = (showToast, playSound) => {
     } catch (e) {}
   };
 
-  // Game Loop (Sync)
   useEffect(() => {
     if (view === 'game' && user) {
       const interval = setInterval(() => fetchState(user.id), CONFIG.TICK_RATE_MS);
@@ -204,10 +212,8 @@ const useGameLogic = (showToast, playSound) => {
 };
 
 // ===============================================
-// 4. UI COMPONENTS (View)
+// 4. UI COMPONENTS
 // ===============================================
-
-// --- Reusable UI Elements ---
 
 const Button = ({ children, onClick, variant = 'primary', style = {}, disabled = false, fullWidth = false }) => {
   const baseStyle = {
@@ -239,8 +245,6 @@ const Button = ({ children, onClick, variant = 'primary', style = {}, disabled =
       onClick={onClick} 
       disabled={disabled}
       style={{ ...baseStyle, ...variants[variant] }}
-      onMouseOver={e => !disabled && (e.currentTarget.style.transform = 'translateY(-2px)')}
-      onMouseOut={e => e.currentTarget.style.transform = 'translateY(0)'}
     >
       {children}
     </button>
@@ -265,8 +269,6 @@ const Input = ({ placeholder, type = 'text', onChange, value }) => (
       outline: 'none',
       transition: 'border-color 0.2s'
     }}
-    onFocus={e => e.target.style.borderColor = THEME.colors.accent}
-    onBlur={e => e.target.style.borderColor = THEME.colors.cardLight}
   />
 );
 
@@ -311,8 +313,6 @@ const Toast = ({ message, type }) => {
   );
 };
 
-// --- Specific Components ---
-
 const StatBox = ({ label, value, color }) => (
   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, background: THEME.colors.bg, padding: '12px', borderRadius: '8px' }}>
     <small style={{ color: THEME.colors.muted, fontSize: '12px', textTransform: 'uppercase' }}>{label}</small>
@@ -334,7 +334,6 @@ const CardItem = ({ card, onEquip }) => {
       marginBottom: '8px',
       borderLeft: `4px solid ${rarityColor}`,
       opacity: isBroken ? 0.5 : 1,
-      transition: 'transform 0.2s'
     }}>
       <div style={{ flex: 1 }}>
         <div style={{ fontWeight: 'bold', color: card.equipped ? THEME.colors.warning : THEME.colors.text }}>
@@ -380,7 +379,6 @@ const MineButton = ({ onClick, disabled }) => (
       flexDirection: 'column',
       alignItems: 'center',
       justifyContent: 'center',
-      transition: 'transform 0.1s, box-shadow 0.2s',
       animation: disabled ? 'none' : 'pulse 2s infinite'
     }}
   >
@@ -394,12 +392,10 @@ const MineButton = ({ onClick, disabled }) => (
 // ===============================================
 
 export default function App() {
-  // Global State
   const [toast, setToast] = useState(null);
   const [tab, setTab] = useState('mine');
   const [form, setForm] = useState({ user: '', pass: '' });
   
-  // Hooks
   const { playSound } = useAudio();
   
   const showToast = (message, type = 'success') => {
@@ -409,14 +405,20 @@ export default function App() {
 
   const game = useGameLogic(showToast, playSound);
 
-  // Derived State
+  // Derived State with Fallbacks
   const activeCards = useMemo(() => game.inventory.filter(c => c.equipped), [game.inventory]);
   const totalPower = useMemo(() => activeCards.reduce((sum, c) => sum + c.mine_power, 0), [activeCards]);
+  
+  // Safe access to user data for display
+  const currentEnergy = game.user?.energy || 0;
+  const maxEnergy = game.user?.max_energy || 100;
+  const currentCredits = game.user?.credits || 0;
 
   // --- RENDER LOGIN ---
   if (game.view === 'login') {
     return (
       <div style={styles.container}>
+        <style>{`@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }`}</style>
         {toast && <Toast {...toast} />}
         
         <Panel style={{ textAlign: 'center' }}>
@@ -451,7 +453,6 @@ export default function App() {
   // --- RENDER GAME ---
   return (
     <div style={styles.container}>
-      {/* Global Styles for Animation */}
       <style>{`
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
         @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
@@ -459,10 +460,10 @@ export default function App() {
 
       {toast && <Toast {...toast} />}
 
-      {/* HEADER STATS */}
+      {/* HEADER STATS - Using safe variables */}
       <Panel style={{ display: 'flex', gap: '10px', padding: '15px' }}>
-        <StatBox label="Credits" value={game.user?.credits} color={THEME.colors.success} />
-        <StatBox label="Energy" value={`${game.user?.energy}/${game.user?.max_energy}`} color={THEME.colors.warning} />
+        <StatBox label="Credits" value={currentCredits} color={THEME.colors.success} />
+        <StatBox label="Energy" value={`${currentEnergy}/${maxEnergy}`} color={THEME.colors.warning} />
         <StatBox label="Power" value={totalPower} color={THEME.colors.accent} />
       </Panel>
 
@@ -497,7 +498,7 @@ export default function App() {
                   Active Tools: {activeCards.length}
                 </p>
                 
-                <MineButton onClick={game.mine} disabled={game.user?.energy < CONFIG.ENERGY_COST} />
+                <MineButton onClick={game.mine} disabled={currentEnergy < CONFIG.ENERGY_COST} />
                 
                 <div style={{ marginTop: '30px', width: '100%', borderTop: `1px solid ${THEME.colors.cardLight}`, paddingTop: '15px' }}>
                   <p style={{ fontSize: '12px', color: THEME.colors.muted, textTransform: 'uppercase', fontWeight: 'bold' }}>
@@ -527,7 +528,7 @@ export default function App() {
               <p style={{ color: THEME.colors.muted, fontSize: '14px' }}>Contains 1 Tool Card</p>
               <h2 style={{ color: THEME.colors.success, marginTop: '10px' }}>{CONFIG.PACK_COST} Credits</h2>
             </div>
-            <Button fullWidth onClick={game.buyPack} disabled={game.isLoading || game.user?.credits < CONFIG.PACK_COST}>
+            <Button fullWidth onClick={game.buyPack} disabled={game.isLoading || currentCredits < CONFIG.PACK_COST}>
               {game.isLoading ? "Opening..." : "Buy Pack"}
             </Button>
           </div>
@@ -549,19 +550,4 @@ export default function App() {
       </Button>
     </div>
   );
-};
-
-// Base Container Style
-const styles = {
-  container: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    minHeight: '100vh',
-    background: THEME.colors.bg,
-    color: THEME.colors.text,
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-    padding: '20px',
-    boxSizing: 'border-box'
-  }
 };
