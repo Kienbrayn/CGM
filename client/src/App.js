@@ -4,7 +4,6 @@ const App = () => {
   const [view, setView] = useState('login'); // login, register, game
   const [user, setUser] = useState(null);
   const [inventory, setInventory] = useState([]);
-  const [logs, setLogs] = useState([]);
   
   // Form State
   const [username, setUsername] = useState('');
