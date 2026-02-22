@@ -152,4 +152,8 @@ app.post('/api/webhook/reward', async (req, res) => {
   }
 });
 
+app.get('/', (req, res) => {
+  res.send('Backend is live!');
+});
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
